@@ -339,6 +339,12 @@ export default function App() {
         </div>
       )}
 
+      {/* TOGGLE VUE SEMAINE / MOIS — AU-DESSUS de la grille */}
+      <div style={{padding:"8px 16px 4px",display:"flex",gap:8}}>
+        <button onClick={()=>setViewMode('week')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='week'?"#111827":"#E5E7EB",color:viewMode==='week'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📆 Semaine</button>
+        <button onClick={()=>setViewMode('month')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='month'?"#111827":"#E5E7EB",color:viewMode==='month'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📅 Mois en un coup d'œil</button>
+      </div>
+
       {/* GRILLE SEMAINE */}
       {viewMode==='week' && week&&(
         <div style={{overflowX:"auto",padding:"0 0 4px 0"}}>
@@ -458,12 +464,6 @@ export default function App() {
           <span style={{fontSize:16,fontWeight:800,color:"#111827"}}>{fmtH(monthHours[user.emp]||0)}</span>
         </div>
       )}
-
-      {/* TOGGLE VUE SEMAINE / MOIS */}
-      <div style={{padding:"8px 16px 4px",display:"flex",gap:8}}>
-        <button onClick={()=>setViewMode('week')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='week'?"#111827":"#E5E7EB",color:viewMode==='week'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📆 Semaine</button>
-        <button onClick={()=>setViewMode('month')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='month'?"#111827":"#E5E7EB",color:viewMode==='month'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📅 Mois en un coup d'œil</button>
-      </div>
 
       {/* ACTIONS RH */}
       {user.role==="rh"&&(
