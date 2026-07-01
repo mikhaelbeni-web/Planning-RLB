@@ -124,6 +124,7 @@ export default function App() {
   const [panel,setPanel]           = useState(null);
   const [myOnly,setMyOnly]         = useState(false);
   const [loading,setLoading]       = useState(false);
+  const [viewMode,setViewMode]     = useState('week');
   const [emailsSentCount,setEmailsSentCount] = useState(0);
   const [preLoginEmps,setPreLoginEmps]   = useState(()=>{ try{return JSON.parse(localStorage.getItem("rlb-emp-cache"))||DEFAULT_EMPS;}catch{return DEFAULT_EMPS;} });
   const [preLoginNames,setPreLoginNames] = useState(()=>{ try{return JSON.parse(localStorage.getItem("rlb-names-cache"))||DEFAULT_EMP_NAMES;}catch{return DEFAULT_EMP_NAMES;} });
@@ -284,8 +285,8 @@ export default function App() {
         </div>
       )}
 
-      {/* GRILLE */}
-      {week&&(
+      {/* GRILLE SEMAINE */}
+      {viewMode==='week' && week&&(
         <div style={{overflowX:"auto",padding:"0 0 4px 0"}}>
           <table style={{borderCollapse:"collapse",width:"100%",minWidth:540}}>
             <thead>
@@ -343,6 +344,47 @@ export default function App() {
         </div>
       )}
 
+      {/* GRILLE MOIS INLINE */}
+      {viewMode==='month' && (
+        <div style={{padding:"8px 16px",overflowX:"auto"}}>
+          <table style={{borderCollapse:"collapse",width:"100%",minWidth:540}}>
+            <thead>
+              <tr style={{background:"#F9FAFB"}}>
+                {DAYS.map((d,i)=>(
+                  <th key={d} style={{padding:"8px 3px",fontSize:11,fontWeight:700,color:i>=5?"#EF4444":"#6B7280",textAlign:"center",border:"1px solid #E5E7EB",textTransform:"uppercase"}}>{d}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {weeks.map(week=>(
+                <tr key={week.id}>
+                  {week.days.map((d,di)=>{
+                    const inM=d.inMonth; const isWE=di>=5;
+                    return(
+                      <td key={di} style={{padding:"4px 3px",background:inM?(isWE?"#FFF5F5":"white"):"#F9FAFB",border:"1px solid #E5E7EB",verticalAlign:"top",minWidth:70,cursor:inM&&user.role==="rh"?"pointer":"default"}}>
+                        {inM&&<>
+                          <div style={{fontSize:11,fontWeight:700,color:isWE?"#EF4444":"#374151",textAlign:"right",paddingRight:3,marginBottom:3}}>{String(d.day).padStart(2,"0")}</div>
+                          {empsToShow.map(emp=>{
+                            const cell=plan[week.id]?.[emp]?.[di]; const isCP=cell?.a==="CP";
+                            return cell?(
+                              <div key={emp} onClick={()=>user.role==="rh"&&setPanel({weekId:week.id,emp,day:di})} style={{background:isCP?"#DCFCE7":C[emp].bg,border:"1px solid "+(isCP?"#86EFAC":C[emp].border),borderRadius:4,padding:"3px 4px",marginBottom:3,cursor:user.role==="rh"?"pointer":"default"}}>
+                                <div style={{fontSize:9,fontWeight:700,color:isCP?"#065F46":C[emp].text,lineHeight:1.3}}>{isCP?"🌴 CP":cell.a}</div>
+                                {cell.b&&<div style={{fontSize:9,fontWeight:700,color:C[emp].text,lineHeight:1.3}}>{cell.b}</div>}
+                                <div style={{fontSize:8,color:C[emp].text,opacity:0.7,marginTop:1}}>{N(emp)}</div>
+                              </div>
+                            ):null;
+                          })}
+                        </>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {/* LÉGENDE */}
       <div style={{padding:"8px 16px 4px",display:"flex",flexWrap:"wrap",gap:6}}>
         {emps.map(e=>(
@@ -363,9 +405,10 @@ export default function App() {
         </div>
       )}
 
-      {/* VUE MOIS */}
-      <div style={{padding:"8px 16px 0",display:"flex",gap:8}}>
-        <button onClick={()=>setPanel("monthview")} style={{flex:1,padding:"9px 0",border:"1px solid #E5E7EB",borderRadius:10,background:"white",fontSize:13,fontWeight:600,color:"#374151",cursor:"pointer"}}>📅 Mois en un coup d'œil</button>
+      {/* TOGGLE VUE SEMAINE / MOIS */}
+      <div style={{padding:"8px 16px 4px",display:"flex",gap:8}}>
+        <button onClick={()=>setViewMode('week')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='week'?"#111827":"#E5E7EB",color:viewMode==='week'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📆 Semaine</button>
+        <button onClick={()=>setViewMode('month')} style={{flex:1,padding:"9px 0",border:"none",borderRadius:10,background:viewMode==='month'?"#111827":"#E5E7EB",color:viewMode==='month'?"white":"#6B7280",fontSize:13,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>📅 Mois en un coup d'œil</button>
       </div>
 
       {/* ACTIONS RH */}
