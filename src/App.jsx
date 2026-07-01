@@ -113,6 +113,7 @@ export default function App() {
   const [user,setUser]             = useState(savedUser);
   const [showPortal,setShowPortal] = useState(!savedUser);
   const [emps,setEmps]             = useState(DEFAULT_EMPS);
+  const [deletedEmps,setDeletedEmps] = useState({});  // { EMP_ID: { ts, names, emails, contracts } }
   const [plan,setPlan]             = useState({});
   const [contracts,setContracts]   = useState(DEFAULT_CONTRACTS);
   const [empNames,setEmpNames]     = useState(DEFAULT_EMP_NAMES);
@@ -157,7 +158,8 @@ export default function App() {
     const u4=S.listen("rlb-empnames",v=>{ const n=v||DEFAULT_EMP_NAMES; setEmpNames(n); NAMES=n; markLoaded(); });
     const u5=S.listen("rlb-empemails",v=>{ setEmpEmails(v||DEFAULT_EMP_EMAILS); markLoaded(); });
     const u6=S.listen("rlb-emp-list",v=>{ const list=v||DEFAULT_EMPS; setEmps(list); _dynEmps=list.filter(e=>!(e in C_BASE)); });
-    return()=>{ u1();u2();u3();u4();u5();u6(); };
+    const u7=S.listen("rlb-emp-deleted",v=>{ setDeletedEmps(v||{}); });
+    return()=>{ u1();u2();u3();u4();u5();u6();u7(); };
   },[user]);
 
   const goMonth=(delta)=>{ setCurMonth(prev=>{ let m=prev.month+delta,y=prev.year; if(m>12){m=1;y++;}if(m<1){m=12;y--;} return{year:y,month:m}; }); setWeekIdx(0); };
@@ -210,17 +212,69 @@ export default function App() {
   const saveEmpSettings=async(names,emails,empList)=>{
     const list=empList||emps;
     const removed=emps.filter(e=>!list.includes(e));
-    const newContracts={...contracts}; list.forEach(e=>{if(newContracts[e]===undefined)newContracts[e]=35;}); removed.forEach(e=>{delete newContracts[e];});
-    const newNames={...names}; removed.forEach(e=>delete newNames[e]);
-    const newEmails={...emails}; removed.forEach(e=>delete newEmails[e]);
+
+    // Archiver les employés supprimés (sans toucher aux données planning)
+    const newDeleted={...deletedEmps};
+    removed.forEach(emp=>{
+      newDeleted[emp]={
+        ts: Date.now(),
+        name: names[emp]||empNames[emp]||emp,
+        email: emails[emp]||empEmails[emp]||"",
+        contract: contracts[emp]||35,
+        deletedBy: user.name,
+      };
+    });
+
+    const newContracts={...contracts}; list.forEach(e=>{if(newContracts[e]===undefined)newContracts[e]=35;});
+    // NE PAS supprimer les contrats/noms/emails des archivés (on garde tout)
+    const newNames={...names};
+    const newEmails={...emails};
+
     setEmps(list); _dynEmps=list.filter(e=>!(e in C_BASE));
     setEmpNames(newNames); NAMES=newNames;
     setEmpEmails(newEmails); setContracts(newContracts);
-    await S.set("rlb-emp-list",list); await S.set("rlb-empnames",newNames);
-    await S.set("rlb-empemails",newEmails); await S.set("rlb-contracts",newContracts);
+    setDeletedEmps(newDeleted);
+
+    await S.set("rlb-emp-list",list);
+    await S.set("rlb-empnames",newNames);
+    await S.set("rlb-empemails",newEmails);
+    await S.set("rlb-contracts",newContracts);
+    await S.set("rlb-emp-deleted",newDeleted);
+
     try{localStorage.setItem("rlb-emp-cache",JSON.stringify(list)); localStorage.setItem("rlb-names-cache",JSON.stringify(newNames));}catch{}
     setPreLoginEmps(list); setPreLoginNames(newNames);
+
+    if(removed.length>0){
+      pushNotif({ts:Date.now(),type:"edit",msg:`🗑️ ${removed.length} employé(s) archivé(s)`,detail:`Par ${user.name} — récupérable via 👥 › Corbeille`,by:user.name});
+    }
     setPanel(null);
+  };
+
+  // Restaurer un employé archivé
+  const restoreEmp=async(emp)=>{
+    if(!deletedEmps[emp]) return;
+    const restored=deletedEmps[emp];
+    const newEmps=[...emps,emp];
+    const newNames={...empNames,[emp]:restored.name};
+    const newEmails={...empEmails,[emp]:restored.email||""};
+    const newContracts={...contracts,[emp]:restored.contract||35};
+    const newDeleted={...deletedEmps}; delete newDeleted[emp];
+
+    setEmps(newEmps); _dynEmps=newEmps.filter(e=>!(e in C_BASE));
+    setEmpNames(newNames); NAMES=newNames;
+    setEmpEmails(newEmails); setContracts(newContracts);
+    setDeletedEmps(newDeleted);
+
+    await S.set("rlb-emp-list",newEmps);
+    await S.set("rlb-empnames",newNames);
+    await S.set("rlb-empemails",newEmails);
+    await S.set("rlb-contracts",newContracts);
+    await S.set("rlb-emp-deleted",newDeleted);
+
+    try{localStorage.setItem("rlb-emp-cache",JSON.stringify(newEmps)); localStorage.setItem("rlb-names-cache",JSON.stringify(newNames));}catch{}
+    setPreLoginEmps(newEmps); setPreLoginNames(newNames);
+
+    pushNotif({ts:Date.now(),type:"edit",msg:`♻️ ${restored.name} restauré`,detail:`Par ${user.name} — heures passées récupérées`,by:user.name});
   };
 
   const saveContracts=async(c)=>{ setContracts(c); await S.set("rlb-contracts",c); };
@@ -428,7 +482,7 @@ export default function App() {
       {/* OVERLAYS */}
       {panel==="changepwd"&&<ChangePwdPanel onClose={()=>setPanel(null)}/>}
 
-      {panel==="empnames"&&<EmpSettingsPanel emps={emps} empNames={empNames} empEmails={empEmails} onSave={saveEmpSettings} onClose={()=>setPanel(null)}/>}
+      {panel==="empnames"&&<EmpSettingsPanel emps={emps} empNames={empNames} empEmails={empEmails} deletedEmps={deletedEmps} onRestore={restoreEmp} onSave={saveEmpSettings} onClose={()=>setPanel(null)}/>}
 
       {panel==="monthview"&&<MonthViewPanel weeks={weeks} plan={plan} emps={emps} empNames={empNames} contracts={contracts} curMonth={curMonth} user={user} myOnly={myOnly} onClose={()=>setPanel(null)}/>}
 
@@ -764,7 +818,7 @@ function PublishSelectPanel({emps,empEmails,curMonth,onPublish,onClose}) {
   );
 }
 
-function EmpSettingsPanel({emps,empNames,empEmails,onSave,onClose}) {
+function EmpSettingsPanel({emps,empNames,empEmails,deletedEmps,onRestore,onSave,onClose}) {
   const[localEmps,setLocalEmps]=useState([...emps]);
   const[names,setNames]=useState({...empNames});
   const[emails,setEmails]=useState({...empEmails});
@@ -800,6 +854,25 @@ function EmpSettingsPanel({emps,empNames,empEmails,onSave,onClose}) {
         <input value={newEmpName} onChange={e=>setNewEmpName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addEmp()} placeholder="Prénom…" autoFocus style={{...inp("#BAE6FD"),marginBottom:8}}/>
         <div style={{display:"flex",gap:6}}><button onClick={()=>{setShowAdd(false);setNewEmpName("");}} style={{flex:1,padding:"8px 0",border:"1px solid #E5E7EB",borderRadius:8,background:"white",color:"#374151",fontSize:12,fontWeight:600,cursor:"pointer"}}>Annuler</button><button onClick={addEmp} disabled={!newEmpName.trim()} style={{flex:2,padding:"8px 0",border:"none",borderRadius:8,background:newEmpName.trim()?"#1D4ED8":"#E5E7EB",color:newEmpName.trim()?"white":"#9CA3AF",fontSize:12,fontWeight:700,cursor:newEmpName.trim()?"pointer":"not-allowed"}}>Ajouter</button></div>
       </div>:<button onClick={()=>setShowAdd(true)} style={{width:"100%",marginBottom:14,padding:"10px 0",border:"2px dashed #D1D5DB",borderRadius:10,background:"#F9FAFB",color:"#374151",fontSize:13,fontWeight:600,cursor:"pointer"}}>➕ Ajouter un employé</button>}
+      {/* CORBEILLE */}
+      {deletedEmps && Object.keys(deletedEmps).length>0 && (
+        <div style={{background:"#FEF3C7",border:"1px solid #FCD34D",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#92400E",marginBottom:8}}>🗑️ Corbeille ({Object.keys(deletedEmps).length})</div>
+          <div style={{fontSize:11,color:"#78350F",marginBottom:10}}>Employés archivés — leurs heures passées sont conservées. Cliquez sur "♻️ Restaurer" pour les récupérer.</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {Object.entries(deletedEmps).map(([emp,info])=>(
+              <div key={emp} style={{display:"flex",alignItems:"center",gap:8,background:"white",borderRadius:8,padding:"8px 10px"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#111827"}}>{info.name||emp}</div>
+                  <div style={{fontSize:10,color:"#6B7280",marginTop:2}}>Archivé le {new Date(info.ts).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})} par {info.deletedBy}</div>
+                </div>
+                <button onClick={()=>onRestore(emp)} style={{background:"#10B981",border:"none",borderRadius:6,padding:"6px 12px",fontSize:12,color:"white",cursor:"pointer",fontWeight:700}}>♻️ Restaurer</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{display:"flex",gap:8}}>
         <button onClick={onClose} style={{flex:1,padding:"12px 0",border:"1px solid #E5E7EB",borderRadius:8,background:"white",color:"#374151",fontSize:14,fontWeight:600,cursor:"pointer"}}>Annuler</button>
         <button onClick={()=>onSave(names,emails,localEmps)} style={{flex:2,padding:"12px 0",border:"none",borderRadius:8,background:"#111827",color:"white",fontSize:14,fontWeight:700,cursor:"pointer"}}>Enregistrer</button>
