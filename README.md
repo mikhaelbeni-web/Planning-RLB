@@ -157,9 +157,9 @@ Pour utiliser votre propre adresse (ex: `planning@residencebeleville.fr`), véri
 
 ## 🕓 Historique et restauration
 
-Chaque modification du planning (case, saisie groupée, duplication, restauration) sauvegarde d'abord la version précédente dans Firestore (`planning/hist-<horodatage>`, index dans `planning/rlb-hist-index`, 300 dernières versions conservées).
+Chaque modification du planning (case, saisie groupée, duplication, annulation) enregistre le contenu des semaines touchées avant et après (`planning/hist-<horodatage>`, index dans `planning/rlb-hist-index`, 1000 dernières actions).
 
-Pour revenir en arrière : connecté en RH, bouton **🕓 Historique** → choisir la modification → **Restaurer cette semaine** (seulement la semaine concernée) ou **Tout restaurer**. Une restauration est elle-même annulable.
+Pour réparer une erreur : connecté en RH, se placer sur la semaine concernée → **🕓 Historique**. La liste montre les actions de cette semaine (bouton « Toutes » pour les autres). Toucher la mauvaise manipulation : l'app affiche case par case ce qui va revenir comme avant, puis **↩️ Annuler cette action**. Seules les cases modifiées par cette action reviennent en arrière ; les actions faites après sont conservées, et une case retouchée depuis n'est pas écrasée. Une annulation est elle-même annulable.
 
 La duplication demande une confirmation quand la semaine de destination contient déjà des créneaux, et ne touche plus aux jours du mois voisin (ex. 26–31 octobre quand on duplique sur la semaine du 26 oct – 1er nov depuis novembre).
 
