@@ -68,7 +68,10 @@ export default async function handler(req,res){
 </body></html>`;
 
   try {
-    await resend.emails.send({from:"Planning RLB <planning@beylev.com>",to:[to],subject:`📅 Planning ${month} — Résidence Le Belleville`,html});
+    // EMAIL_ARCHIVE (variable Vercel, optionnelle) : reçoit une copie cachée de chaque planning envoyé,
+    // pour pouvoir retrouver plus tard exactement ce qui a été publié à chaque salarié.
+    const archive=(process.env.EMAIL_ARCHIVE||"").split(",").map(s=>s.trim()).filter(Boolean);
+    await resend.emails.send({from:"Planning RLB <planning@beylev.com>",to:[to],...(archive.length?{bcc:archive}:{}),subject:`📅 Planning ${month} — Résidence Le Belleville`,html});
     return res.status(200).json({success:true});
   } catch(err){
     console.error("Resend error:",err);
