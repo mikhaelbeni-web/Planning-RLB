@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { db } from "./firebase.js";
-import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
 
 // ─── CONSTANTES ──────────────────────────────────────────────────────────────
 
@@ -50,6 +50,10 @@ const S = {
   async set(k,v) {
     try { await setDoc(doc(db,"planning",k),{value:v,updatedAt:serverTimestamp()}); }
     catch(e) { console.warn("Firebase set error:",e); }
+  },
+  async del(k) {
+    try { await deleteDoc(doc(db,"planning",k)); }
+    catch(e) { console.warn("Firebase delete error:",e); }
   },
   listen(k,callback) {
     return onSnapshot(doc(db,"planning",k),snap=>{ callback(snap.exists()?snap.data().value:null); });
@@ -108,6 +112,25 @@ function buildShiftsForEmail(emp,weeks,plan,curMonth) {
   return rows;
 }
 
+// ─── HISTORIQUE ──────────────────────────────────────────────────────────────
+// Avant chaque modification du planning, l'état précédent est sauvegardé dans
+// planning/hist-<ts>, et listé dans planning/rlb-hist-index (les plus récents d'abord).
+const HIST_MAX = 300;
+function weekIdToLabel(id) {
+  // L'id est la date ISO (UTC) du lundi 00:00 local : souvent le dimanche précédent.
+  const m=/^w(\d{4})(\d{2})(\d{2})$/.exec(id||""); if(!m) return id;
+  const d=new Date(+m[1],+m[2]-1,+m[3]); if(d.getDay()!==1) d.setDate(d.getDate()+((8-d.getDay())%7||7));
+  const e=new Date(d); e.setDate(e.getDate()+6);
+  const dd=x=>String(x.getDate()).padStart(2,"0");
+  if(d.getMonth()===e.getMonth()) return `${dd(d)} – ${dd(e)} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`;
+  return `${dd(d)} ${MONTHS[d.getMonth()].slice(0,3)} – ${dd(e)} ${MONTHS[e.getMonth()].slice(0,3)} ${e.getFullYear()}`;
+}
+function changedWeeks(a,b) {
+  const ids=new Set([...Object.keys(a||{}),...Object.keys(b||{})]);
+  const filled=w=>Object.values(w||{}).some(arr=>(arr||[]).some(c=>c));
+  return [...ids].filter(id=>JSON.stringify((a||{})[id]||null)!==JSON.stringify((b||{})[id]||null) && (filled((a||{})[id])||filled((b||{})[id]))).sort();
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const savedUser=(()=>{ try{return JSON.parse(localStorage.getItem("rlb-session"));}catch{return null;} })();
@@ -120,6 +143,7 @@ export default function App() {
   const [empNames,setEmpNames]     = useState(DEFAULT_EMP_NAMES);
   const [empEmails,setEmpEmails]   = useState(DEFAULT_EMP_EMAILS);
   const [notifs,setNotifs]         = useState([]);
+  const [histIndex,setHistIndex]   = useState([]);
   const [lastSeen,setLastSeen]     = useState(null);
   const [curMonth,setCurMonth]     = useState(()=>{ const n=new Date(); return{year:n.getFullYear(),month:n.getMonth()+1}; });
   const [weekIdx,setWeekIdx]       = useState(0);
@@ -160,7 +184,8 @@ export default function App() {
     const u5=S.listen("rlb-empemails",v=>{ setEmpEmails(v||DEFAULT_EMP_EMAILS); markLoaded(); });
     const u6=S.listen("rlb-emp-list",v=>{ const list=v||DEFAULT_EMPS; setEmps(list); _dynEmps=list.filter(e=>!(e in C_BASE)); });
     const u7=S.listen("rlb-emp-deleted",v=>{ setDeletedEmps(v||{}); });
-    return()=>{ u1();u2();u3();u4();u5();u6();u7(); };
+    const u8=S.listen("rlb-hist-index",v=>{ setHistIndex(v||[]); });
+    return()=>{ u1();u2();u3();u4();u5();u6();u7();u8(); };
   },[user]);
 
   const goMonth=(delta)=>{ setCurMonth(prev=>{ let m=prev.month+delta,y=prev.year; if(m>12){m=1;y++;}if(m<1){m=12;y--;} return{year:y,month:m}; }); setWeekIdx(0); };
@@ -172,13 +197,42 @@ export default function App() {
 
   const monthHours=useMemo(()=>{ const res=Object.fromEntries(emps.map(e=>[e,0])); weeks.forEach(w=>{ const wp=plan[w.id]; if(!wp)return; w.days.forEach((d,i)=>{ if(!d.inMonth)return; emps.forEach(e=>{res[e]=(res[e]||0)+cellMin(wp[e]?.[i]);}); }); }); return res; },[plan,weeks,emps]);
 
+  // Écrit le planning après avoir sauvegardé la version précédente dans l'historique.
+  const savePlan=async(next,label)=>{
+    const prev=plan;
+    setPlan(next);
+    try{
+      const ts=Date.now(), id=`hist-${ts}`;
+      await S.set(id,{plan:prev,label,by:user.name,ts});
+      const idx=await S.get("rlb-hist-index")||[];
+      const nextIdx=[{id,ts,label,by:user.name},...idx];
+      const dropped=nextIdx.slice(HIST_MAX);
+      await S.set("rlb-hist-index",nextIdx.slice(0,HIST_MAX));
+      dropped.forEach(h=>S.del(h.id));
+    }catch(e){ console.warn("Historique error:",e); }
+    await S.set("rlb-plan",next);
+  };
+
+  const restoreFromHist=async(entry,weekId)=>{
+    const snap=await S.get(entry.id); if(!snap||!snap.plan) return false;
+    const when=new Date(entry.ts).toLocaleString("fr-FR",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
+    let next;
+    if(weekId){ next={...plan}; if(snap.plan[weekId]) next[weekId]=snap.plan[weekId]; else delete next[weekId]; }
+    else next=snap.plan;
+    const label=weekId?`♻️ Semaine ${weekIdToLabel(weekId)} restaurée (version du ${when})`:`♻️ Planning restauré (version du ${when})`;
+    await savePlan(next,label);
+    pushNotif({ts:Date.now(),type:"edit",msg:label,detail:`Par ${user.name}`,by:user.name});
+    return true;
+  };
+
   const saveCell=async(weekId,emp,dayIdx,data)=>{
     const next=JSON.parse(JSON.stringify(plan));
     if(!next[weekId])next[weekId]=getWeekPlan(weekId);
     if(!next[weekId][emp])next[weekId][emp]=Array(7).fill(null);
     next[weekId][emp][dayIdx]=data;
-    setPlan(next); await S.set("rlb-plan",next);
-    const notif={ts:Date.now(),type:"edit",msg:`✏️ ${N(emp)} · ${week.label} · ${DAYS[dayIdx]}`,detail:data?`${data.a}${data.b?" / "+data.b:""}`:data===null?"CP":"Repos",by:user.name};
+    const detail=data?`${data.a}${data.b?" / "+data.b:""}`:"Repos";
+    await savePlan(next,`✏️ ${N(emp)} · ${weekIdToLabel(weekId)} · ${DAYS[dayIdx]} → ${detail}`);
+    const notif={ts:Date.now(),type:"edit",msg:`✏️ ${N(emp)} · ${weekIdToLabel(weekId)} · ${DAYS[dayIdx]}`,detail,by:user.name};
     pushNotif(notif); setPanel(null);
   };
 
@@ -186,8 +240,8 @@ export default function App() {
     const next=JSON.parse(JSON.stringify(plan));
     const weeksToApply=scope==="month"?weeks:[weeks[weekIdx]];
     weeksToApply.forEach(wk=>{ if(!next[wk.id])next[wk.id]=getWeekPlan(wk.id); empsArg.forEach(emp=>{ if(!next[wk.id][emp])next[wk.id][emp]=Array(7).fill(null); dayIndices.forEach(di=>{ if(wk.days[di]?.inMonth)next[wk.id][emp][di]=data; }); }); });
-    setPlan(next); await S.set("rlb-plan",next);
     const scopeLabel=scope==="month"?`tout ${MONTHS[curMonth.month-1]}`:(weeks[weekIdx]?.label||"");
+    await savePlan(next,`⚡ Saisie groupée — ${empsArg.map(e=>N(e)).join(", ")} · ${scopeLabel}`);
     pushNotif({ts:Date.now(),type:"bulk",msg:`⚡ Saisie groupée — ${empsArg.map(e=>N(e)).join(", ")}`,detail:`${dayIndices.map(d=>DAYS[d]).join(", ")} · ${scopeLabel}`,by:user.name});
     setPanel(null);
   };
@@ -282,9 +336,10 @@ export default function App() {
   const pushNotif=async(n)=>{ const next=[n,...notifs].slice(0,100); setNotifs(next); await S.set("rlb-notifs",next); };
 
   const duplicateWeekFn=async(srcId,dstId,srcPlan,dstPlan)=>{
-    const next={...plan,[dstId]:dstPlan}; setPlan(next); await S.set("rlb-plan",next);
-    pushNotif({ts:Date.now(),type:"edit",msg:`📋 Semaine dupliquée`,detail:`Par ${user.name}`,by:user.name});
-    setPanel(null);
+    const next={...plan,[dstId]:dstPlan};
+    const label=`📋 Semaine ${weekIdToLabel(srcId)} dupliquée sur ${weekIdToLabel(dstId)}`;
+    await savePlan(next,label);
+    pushNotif({ts:Date.now(),type:"edit",msg:label,detail:`Par ${user.name} — annulable via 🕓 Historique`,by:user.name});
   };
 
   if(showPortal) return <Portal onEnterPlanning={()=>setShowPortal(false)} />;
@@ -472,6 +527,7 @@ export default function App() {
           <button onClick={()=>setPanel("bulk")} style={{...BTN_BASE,background:"#1D4ED8",flex:1,minWidth:100}}>⚡ Saisie groupée</button>
           <button onClick={()=>setPanel("duplicate")} style={{...BTN_BASE,background:"#7C3AED",flex:1,minWidth:100}}>📋 Dupliquer</button>
           <button onClick={()=>setPanel("hours")} style={{...BTN_BASE,background:"#059669",flex:1,minWidth:100}}>📊 Compteur</button>
+          <button onClick={()=>setPanel("history")} style={{...BTN_BASE,background:"#374151",flex:1,minWidth:100}}>🕓 Historique</button>
           <button onClick={()=>setPanel("publish_select")} style={{...BTN_BASE,background:"#DC2626",flex:"0 0 100%"}}>📢 Publier le planning — {MONTHS[curMonth.month-1]}</button>
         </div>
       )}
@@ -488,6 +544,8 @@ export default function App() {
       {panel==="monthview"&&<MonthViewPanel weeks={weeks} plan={plan} emps={emps} empNames={empNames} contracts={contracts} curMonth={curMonth} user={user} myOnly={myOnly} onClose={()=>setPanel(null)}/>}
 
       {panel==="duplicate"&&<DuplicatePanel weeks={weeks} weekIdx={weekIdx} plan={plan} emps={emps} getWeekPlan={getWeekPlan} curMonth={curMonth} onDuplicate={duplicateWeekFn} onClose={()=>setPanel(null)}/>}
+
+      {panel==="history"&&<HistoryPanel histIndex={histIndex} plan={plan} onRestore={restoreFromHist} onClose={()=>setPanel(null)}/>}
 
       {panel==="publish_select"&&<PublishSelectPanel emps={emps} empEmails={empEmails} curMonth={curMonth} onPublish={publish} onClose={()=>setPanel(null)}/>}
 
@@ -759,7 +817,17 @@ function DuplicatePanel({weeks,weekIdx,plan,emps,getWeekPlan,curMonth,onDuplicat
   const srcWeek=srcWeeks[srcIdx],dstWeek=dstWeeks[dstIdx];
   const same=srcWeek?.id===dstWeek?.id;
   const goM=(cur,set,d)=>{ let m=cur.month+d,y=cur.year; if(m>12){m=1;y++;}if(m<1){m=12;y--;} set({year:y,month:m}); };
-  const handleDo=async()=>{ if(same||!srcWeek||!dstWeek)return; const srcPlan=plan[srcWeek.id]||getWeekPlan(srcWeek.id); const dstPlan={}; emps.forEach(emp=>{ dstPlan[emp]=(srcPlan[emp]||Array(7).fill(null)).map((cell,di)=>dstWeek.days[di]?.inMonth?cell:null); }); await onDuplicate(srcWeek.id,dstWeek.id,srcPlan,dstPlan); setDone(true); };
+  const dstExisting=dstWeek?(plan[dstWeek.id]||{}):{};
+  const dstFilled=dstWeek?Object.values(dstExisting).reduce((n,arr)=>n+(arr||[]).filter((c,di)=>c&&dstWeek.days[di]?.inMonth).length,0):0;
+  const[confirmOverwrite,setConfirmOverwrite]=useState(false);
+  useEffect(()=>{ setConfirmOverwrite(false); },[srcWeek?.id,dstWeek?.id]);
+  const handleDo=async()=>{ if(same||!srcWeek||!dstWeek)return;
+    if(dstFilled>0&&!confirmOverwrite){ setConfirmOverwrite(true); return; }
+    const srcPlan=plan[srcWeek.id]||getWeekPlan(srcWeek.id); const dstPlan={};
+    const allEmps=[...new Set([...emps,...Object.keys(dstExisting)])];
+    // Les jours hors du mois de destination gardent leur valeur actuelle (ils appartiennent au mois voisin).
+    allEmps.forEach(emp=>{ dstPlan[emp]=Array.from({length:7},(_,di)=>dstWeek.days[di]?.inMonth?((srcPlan[emp]||[])[di]??null):((dstExisting[emp]||[])[di]??null)); });
+    await onDuplicate(srcWeek.id,dstWeek.id,srcPlan,dstPlan); setDone(true); };
   const WkBtn=(w,i,activeIdx,setIdx)=><button key={i} onClick={()=>setIdx(i)} style={{flex:1,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,background:i===activeIdx?"#111827":"#F3F4F6",color:i===activeIdx?"white":"#374151"}}>Sem.{i+1}<br/><span style={{fontSize:9,opacity:0.7}}>{w.label.split("–")[0].trim()}</span></button>;
   if(done)return<Overlay onClose={onClose}><div style={{textAlign:"center",padding:"8px 0 16px"}}><div style={{fontSize:40,marginBottom:12}}>✅</div><div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Planning dupliqué !</div><div style={{color:"#6B7280",fontSize:13,marginBottom:20}}>{srcWeek?.label} → {dstWeek?.label}</div><button onClick={onClose} style={{padding:"12px 32px",border:"none",borderRadius:8,background:"#111827",color:"white",fontSize:14,fontWeight:600,cursor:"pointer"}}>Fermer</button></div></Overlay>;
   return(
@@ -779,12 +847,65 @@ function DuplicatePanel({weeks,weekIdx,plan,emps,getWeekPlan,curMonth,onDuplicat
           {dstWeek&&<div style={{marginTop:6,fontSize:10,color:"#92400E",textAlign:"center"}}>{dstWeek.label}</div>}
         </div>
       </div>
-      {!same&&srcWeek&&dstWeek&&<div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,textAlign:"center"}}><strong style={{color:"#1E40AF"}}>{srcWeek.label}</strong><span style={{color:"#6B7280",margin:"0 10px"}}>→</span><strong style={{color:"#1E40AF"}}>{dstWeek.label}</strong><div style={{fontSize:11,color:"#9CA3AF",marginTop:4}}>⚠️ La semaine destination sera remplacée</div></div>}
+      {!same&&srcWeek&&dstWeek&&<div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,textAlign:"center"}}><strong style={{color:"#1E40AF"}}>{srcWeek.label}</strong><span style={{color:"#6B7280",margin:"0 10px"}}>→</span><strong style={{color:"#1E40AF"}}>{dstWeek.label}</strong><div style={{fontSize:11,color:dstFilled>0?"#B91C1C":"#9CA3AF",marginTop:4,fontWeight:dstFilled>0?700:400}}>{dstFilled>0?`⚠️ La semaine destination contient déjà ${dstFilled} créneau(x) : ils seront remplacés`:"La semaine destination est vide"}</div></div>}
       {same&&<div style={{background:"#FEF3C7",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#92400E",textAlign:"center"}}>⚠️ Choisissez deux semaines différentes</div>}
       <div style={{display:"flex",gap:8}}>
         <button onClick={onClose} style={{flex:1,padding:"12px 0",border:"1px solid #E5E7EB",borderRadius:8,background:"white",color:"#374151",fontSize:14,fontWeight:600,cursor:"pointer"}}>Annuler</button>
-        <button disabled={same||!srcWeek||!dstWeek} onClick={handleDo} style={{flex:2,padding:"12px 0",border:"none",borderRadius:8,background:(!same&&srcWeek&&dstWeek)?"#7C3AED":"#E5E7EB",color:(!same&&srcWeek&&dstWeek)?"white":"#9CA3AF",fontSize:14,fontWeight:700,cursor:(!same&&srcWeek&&dstWeek)?"pointer":"not-allowed"}}>Dupliquer →</button>
+        <button disabled={same||!srcWeek||!dstWeek} onClick={handleDo} style={{flex:2,padding:"12px 0",border:"none",borderRadius:8,background:(!same&&srcWeek&&dstWeek)?"#7C3AED":"#E5E7EB",color:(!same&&srcWeek&&dstWeek)?"white":"#9CA3AF",fontSize:14,fontWeight:700,cursor:(!same&&srcWeek&&dstWeek)?"pointer":"not-allowed",...(confirmOverwrite?{background:"#DC2626"}:{})}}>{confirmOverwrite?`Oui, remplacer ${dstFilled} créneau(x)`:"Dupliquer →"}</button>
       </div>
+    </Overlay>
+  );
+}
+
+function HistoryPanel({histIndex,plan,onRestore,onClose}) {
+  const[sel,setSel]=useState(null);       // entrée choisie
+  const[snap,setSnap]=useState(null);     // contenu de la version choisie
+  const[busy,setBusy]=useState(false);
+  const[done,setDone]=useState(null);
+  const[confirm,setConfirm]=useState(null); // "all" | weekId
+  const open=async(h)=>{ setSel(h); setSnap(null); setConfirm(null); const v=await S.get(h.id); setSnap(v?.plan||{}); };
+  const fmt=ts=>new Date(ts).toLocaleString("fr-FR",{weekday:"short",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
+  const doRestore=async(weekId)=>{ setBusy(true); const ok=await onRestore(sel,weekId||null); setBusy(false); setDone(ok?(weekId?`Semaine ${weekIdToLabel(weekId)} restaurée`:"Planning restauré"):"Échec de la restauration"); };
+  if(done) return <Overlay onClose={onClose}><div style={{textAlign:"center",padding:"8px 0 16px"}}><div style={{fontSize:40,marginBottom:12}}>✅</div><div style={{fontWeight:700,fontSize:16,marginBottom:8}}>{done}</div><div style={{color:"#6B7280",fontSize:12,marginBottom:20}}>Cette restauration est elle-même annulable depuis l'historique.</div><button onClick={onClose} style={{...BTN_BASE,background:"#111827",padding:"12px 32px"}}>Fermer</button></div></Overlay>;
+  if(sel){
+    const diff=snap?changedWeeks(snap,plan):[];
+    const btn=(key,label,onYes)=>confirm===key
+      ?<div style={{display:"flex",gap:6}}><button disabled={busy} onClick={onYes} style={{flex:1,padding:"8px 0",border:"none",borderRadius:8,background:"#DC2626",color:"white",fontSize:12,fontWeight:700,cursor:"pointer"}}>{busy?"…":"Confirmer"}</button><button onClick={()=>setConfirm(null)} style={{padding:"8px 10px",border:"1px solid #E5E7EB",borderRadius:8,background:"white",fontSize:12,cursor:"pointer"}}>Non</button></div>
+      :<button onClick={()=>setConfirm(key)} style={{padding:"8px 10px",border:"none",borderRadius:8,background:"#111827",color:"white",fontSize:12,fontWeight:700,cursor:"pointer"}}>{label}</button>;
+    return(
+      <Overlay onClose={onClose}>
+        <button onClick={()=>setSel(null)} style={{background:"none",border:"none",color:"#6B7280",fontSize:13,cursor:"pointer",padding:0,marginBottom:10}}>‹ Retour à l'historique</button>
+        <div style={{fontWeight:700,fontSize:15,color:"#111827"}}>Version d'avant : {sel.label}</div>
+        <div style={{fontSize:12,color:"#9CA3AF",marginBottom:14}}>{fmt(sel.ts)} · {sel.by}</div>
+        {!snap&&<div style={{color:"#9CA3AF",fontSize:13,padding:16,textAlign:"center"}}>Chargement…</div>}
+        {snap&&diff.length===0&&<div style={{color:"#6B7280",fontSize:13,padding:12,background:"#F9FAFB",borderRadius:8}}>Cette version est identique au planning actuel.</div>}
+        {snap&&diff.length>0&&<>
+          <div style={{fontSize:12,color:"#374151",marginBottom:8}}>Semaines différentes du planning actuel :</div>
+          {diff.map(id=>(
+            <div key={id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"8px 10px",border:"1px solid #F3F4F6",borderRadius:8,marginBottom:6}}>
+              <span style={{fontSize:13,fontWeight:600,color:"#111827"}}>{weekIdToLabel(id)}</span>
+              {btn(id,"Restaurer cette semaine",()=>doRestore(id))}
+            </div>
+          ))}
+          <div style={{marginTop:14,paddingTop:12,borderTop:"1px solid #F3F4F6",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+            <span style={{fontSize:12,color:"#6B7280"}}>Ou remettre tout le planning dans cet état</span>
+            {btn("all","Tout restaurer",()=>doRestore(null))}
+          </div>
+        </>}
+      </Overlay>
+    );
+  }
+  return(
+    <Overlay onClose={onClose}>
+      <div style={{fontWeight:700,fontSize:16,color:"#111827"}}>🕓 Historique des modifications</div>
+      <div style={{fontSize:12,color:"#9CA3AF",marginBottom:14}}>Chaque modification garde une copie du planning d'avant. Touchez une ligne pour revenir en arrière.</div>
+      {histIndex.length===0&&<div style={{color:"#9CA3AF",textAlign:"center",padding:24,fontSize:13}}>Aucune modification enregistrée pour l'instant</div>}
+      {histIndex.map(h=>(
+        <div key={h.id} onClick={()=>open(h)} style={{padding:"10px 12px",borderRadius:8,marginBottom:6,background:"#F9FAFB",border:"1px solid #F3F4F6",cursor:"pointer"}}>
+          <div style={{fontWeight:600,fontSize:13,color:"#111827"}}>{h.label}</div>
+          <div style={{fontSize:11,color:"#9CA3AF",marginTop:3}}>{fmt(h.ts)} · {h.by}</div>
+        </div>
+      ))}
     </Overlay>
   );
 }
